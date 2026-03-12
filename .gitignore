@@ -2,6 +2,7 @@
 db/*.sqlite
 db/*.sqlite-journal
 uploads/
+samples/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
