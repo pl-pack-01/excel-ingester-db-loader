@@ -27,22 +27,59 @@ Power BI connects for reporting
 | Database | SQLite |
 | Analytics | Power BI Desktop (ODBC) |
 
+## Prerequisites
+
+- Python 3.10 or later — [download here](https://www.python.org/downloads/)
+- pip (included with Python)
+
 ## Setup
 
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/your-username/excel-ingester-db-loader.git
+   cd excel-ingester-db-loader
+   ```
+
+2. Create a virtual environment (recommended):
+   ```bash
+   python -m venv .venv
+   .venv\Scripts\activate        # Windows
+   # source .venv/bin/activate   # macOS / Linux
+   ```
+
+3. Install dependencies:
+   ```bash
+   pip install streamlit pandas openpyxl
+   ```
+
+## Running the app
+
 ```bash
-pip install streamlit pandas openpyxl
 streamlit run app.py
 ```
 
+This opens the app in your default browser at `http://localhost:8501`. The SQLite database is created automatically at `db/data.sqlite` on first load.
+
 ## Usage
 
-1. Open the app in your browser (Streamlit launches automatically)
-2. Upload one or more `.xlsx` files
+1. Go to the **Upload** tab
+2. Drag and drop one or more `.xlsx` files
 3. Review the preview — edit the target table name if needed
 4. Click **Load** to write to SQLite
-5. Browse loaded tables and view data in the **Database** tab
+5. Switch to the **Database** tab to browse loaded tables and view data
 
-The SQLite file is saved at `db/data.sqlite` by default.
+The **Admin** sidebar (visible on every tab) lets you:
+
+- Change the SQLite database path — useful for working with multiple databases
+- See the database file location and size
+- View a summary of all loaded tables with row and column counts
+
+## Running tests
+
+```bash
+pip install pytest
+python -m pytest tests/ -v
+```
 
 ## Connecting Power BI
 
