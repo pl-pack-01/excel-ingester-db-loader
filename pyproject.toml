@@ -1,6 +1,6 @@
 [project]
 name = "excel-ingester-db-loader"
-version = "0.1.0"
+version = "1.0.0"
 description = "Simple Streamlit app for loading Excel spreadsheets into SQLite"
 requires-python = ">=3.10"
 dependencies = [

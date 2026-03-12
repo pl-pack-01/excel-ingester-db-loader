@@ -61,4 +61,4 @@ The SQLite file is saved at `db/data.sqlite` by default.
 
 ---
 
-*Excel Data Ingestor · v0.1.0*
+*Excel Data Ingestor · v1.0.0*
