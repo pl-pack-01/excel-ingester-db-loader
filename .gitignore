@@ -1,3 +1,8 @@
+# Project-specific
+db/*.sqlite
+db/*.sqlite-journal
+uploads/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

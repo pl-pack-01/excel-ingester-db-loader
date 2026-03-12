@@ -1,0 +1,7 @@
+{
+  "mappings": [
+    { "pattern": "sales",      "table": "sales" },
+    { "pattern": "inventory",  "table": "inventory" },
+    { "pattern": "inv(oice)?", "table": "invoices" }
+  ]
+}

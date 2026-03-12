@@ -1,0 +1,21 @@
+[project]
+name = "excel-ingester-db-loader"
+version = "0.1.0"
+description = "Browser-based tool for loading Excel spreadsheets into SQLite/PostgreSQL with AI-assisted table routing and column mapping"
+requires-python = ">=3.10"
+dependencies = [
+    "flask>=3.0",
+    "pandas>=2.0",
+    "openpyxl>=3.1",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
