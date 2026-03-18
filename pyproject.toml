@@ -1,14 +1,12 @@
 [project]
 name = "excel-ingester-db-loader"
-version = "1.1.0"
-description = "Streamlit app for loading Excel spreadsheets into SQLite — with Outlook integration"
+version = "1.0.0"
+description = "Simple Streamlit app for loading Excel spreadsheets into SQLite"
 requires-python = ">=3.10"
 dependencies = [
     "streamlit>=1.30",
     "pandas>=2.0",
     "openpyxl>=3.1",
-    "msal>=1.28",
-    "requests>=2.31",
 ]
 
 [project.optional-dependencies]
