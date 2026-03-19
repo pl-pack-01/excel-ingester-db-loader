@@ -1,6 +1,5 @@
 """Streamlit app — upload Excel files, preview, and load into SQLite."""
 
-import os
 from pathlib import Path
 
 import streamlit as st
