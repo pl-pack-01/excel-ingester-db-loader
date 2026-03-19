@@ -6,8 +6,9 @@ from pathlib import Path
 import streamlit as st
 import pandas as pd
 
-from db import get_conn, get_tables, DB_PATH
+from db import get_conn, get_tables, DB_PATH, ensure_ingest_log, is_already_ingested, record_ingest
 from ingest import read_excel, table_name_from_filename, normalise_columns, load_to_db
+from outlook import scan_for_attachments
 
 st.set_page_config(page_title="Excel Data Ingestor", layout="wide")
 st.title("Excel Data Ingestor")
@@ -45,7 +46,7 @@ with st.sidebar:
 
 # ── Tabs ────────────────────────────────────────────────────────────────────
 
-upload_tab, database_tab = st.tabs(["Upload", "Database"])
+upload_tab, outlook_tab, database_tab, charts_tab = st.tabs(["Upload", "Outlook", "Database", "Charts"])
 
 # ── Upload tab ──────────────────────────────────────────────────────────────
 
@@ -83,7 +84,138 @@ with upload_tab:
                 st.success(f"Loaded {rows} rows into `{table_name}`")
                 st.rerun()
 
-# ── Database tab ────────────────────────────────────────────────────────────
+# ── Outlook tab ─────────────────────────────────────────────────────────────
+
+with outlook_tab:
+    st.subheader("Import from Outlook")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        days_back = st.number_input("Days back", min_value=1, value=30)
+    with col2:
+        subfolder = st.text_input("Inbox subfolder (optional)", value="")
+    with col3:
+        subject_filter = st.text_input("Subject contains (optional)", value="")
+
+    if st.button("Scan for Excel attachments"):
+        with st.spinner("Scanning Outlook…"):
+            try:
+                attachments, diag = scan_for_attachments(
+                    subfolder=subfolder,
+                    days_back=int(days_back),
+                    subject_filter=subject_filter,
+                )
+                st.session_state["outlook_attachments"] = attachments
+                st.session_state["outlook_diag"] = diag
+            except Exception as e:
+                st.error(str(e))
+                st.session_state.pop("outlook_attachments", None)
+                st.session_state.pop("outlook_diag", None)
+
+    attachments = st.session_state.get("outlook_attachments")
+    diag = st.session_state.get("outlook_diag")
+
+    if diag is not None:
+        st.caption(
+            f"Folder: **{diag.folder_name}** · "
+            f"Date range: {diag.date_from} → {diag.date_to}"
+        )
+
+        with st.expander("Scan details", expanded=(len(attachments) == 0)):
+            st.table(
+                pd.DataFrame(
+                    [
+                        ("Total items in folder", diag.total_items),
+                        ("Skipped — not a mail item", diag.skipped_non_mail),
+                        ("Skipped — older than date range", diag.skipped_too_old),
+                        ("In date range", diag.in_date_range),
+                        ("Skipped — no attachments", diag.skipped_no_attachment),
+                        ("Skipped — subject filter", diag.skipped_subject_filter),
+                        ("Skipped — non-Excel attachment", diag.skipped_non_excel),
+                        ("Excel attachments found", diag.excel_attachments_found),
+                    ],
+                    columns=["Stage", "Count"],
+                )
+            )
+            if diag.errors:
+                st.warning(f"{len(diag.errors)} error(s) during scan:")
+                for err in diag.errors:
+                    st.code(err, language=None)
+
+        if attachments:
+            conn_check = get_conn(db_path)
+            ensure_ingest_log(conn_check)
+            already_ingested = {
+                i
+                for i, a in enumerate(attachments)
+                if is_already_ingested(conn_check, a.filename, a.received)
+            }
+            conn_check.close()
+
+            select_all = st.checkbox(
+                "Select all for import",
+                value=st.session_state.get("outlook_select_all", False),
+                key="outlook_select_all",
+            )
+
+            att_df = pd.DataFrame(
+                [
+                    {
+                        "Import": select_all and i not in already_ingested,
+                        "Already imported": i in already_ingested,
+                        "Subject": a.subject,
+                        "From": a.sender,
+                        "Received": a.received,
+                        "Filename": a.filename,
+                    }
+                    for i, a in enumerate(attachments)
+                ]
+            )
+
+            edited = st.data_editor(
+                att_df,
+                column_config={
+                    "Import": st.column_config.CheckboxColumn("Import", default=False),
+                    "Already imported": st.column_config.CheckboxColumn("Already imported"),
+                },
+                disabled=["Already imported", "Subject", "From", "Received", "Filename"],
+                use_container_width=True,
+                hide_index=True,
+                key=f"outlook_table_{select_all}_{st.session_state.get('outlook_import_version', 0)}",
+            )
+
+            selected_indices = edited.index[edited["Import"]].tolist()
+
+            if selected_indices and st.button(f"Import {len(selected_indices)} selected"):
+                conn = get_conn(db_path)
+                ensure_ingest_log(conn)
+                for idx in selected_indices:
+                    att = attachments[idx]
+                    if is_already_ingested(conn, att.filename, att.received):
+                        st.warning(f"Skipped **{att.filename}** — already imported (received {att.received})")
+                        continue
+                    try:
+                        df = read_excel(att.temp_path)
+                        df = normalise_columns(df)
+                        df["_source_file"] = att.filename
+                        df["_ingested_at"] = att.received
+                        table = table_name_from_filename(att.filename)
+                        rows = load_to_db(conn, df, table)
+                        record_ingest(conn, att.filename, att.received, table, rows)
+                        st.success(f"Loaded {rows} rows from **{att.filename}** into `{table}`")
+                    except Exception as e:
+                        st.error(f"Failed to import **{att.filename}**: {e}")
+                conn.close()
+                st.session_state["outlook_import_version"] = (
+                    st.session_state.get("outlook_import_version", 0) + 1
+                )
+                st.rerun()
+
+    elif "outlook_diag" in st.session_state:
+        st.info("No Excel attachments found matching those criteria.")
+
+
+# ── Database tab ─────────────────────────────────────────────────────────────
 
 with database_tab:
     conn = get_conn(db_path)
@@ -99,3 +231,85 @@ with database_tab:
                 st.dataframe(df, use_container_width=True)
 
     conn.close()
+
+# ── Charts tab ───────────────────────────────────────────────────────────────
+
+with charts_tab:
+    conn = get_conn(db_path)
+    all_tables = get_tables(conn)
+    data_tables = [t for t in all_tables if not t["name"].startswith("_")]
+
+    if not data_tables:
+        st.info("No data tables yet. Import some files first.")
+        conn.close()
+    else:
+        # ── Volume overview ──────────────────────────────────────────────────
+        st.subheader("Volume by table")
+        overview_df = (
+            pd.DataFrame({"Rows": {t["name"]: t["row_count"] for t in data_tables}})
+            .sort_values("Rows")
+        )
+        st.bar_chart(overview_df, horizontal=True)
+
+        st.divider()
+
+        # ── Per-table deep-dive ──────────────────────────────────────────────
+        st.subheader("Deep dive")
+        selected_table = st.selectbox(
+            "Select a table",
+            [t["name"] for t in data_tables],
+            key="charts_table",
+        )
+
+        df = pd.read_sql(f"SELECT * FROM [{selected_table}]", conn)
+        conn.close()
+        existing = set(df.columns)
+        lob_col = "lob" if "lob" in existing else "reporter_lob" if "reporter_lob" in existing else None
+
+        left, right = st.columns(2)
+        slot = [left, right]
+        slot_idx = 0
+
+        def _next_slot():
+            global slot_idx
+            c = slot[slot_idx % 2]
+            slot_idx += 1
+            return c
+
+        if "state" in existing:
+            with _next_slot():
+                st.markdown("**By state**")
+                st.bar_chart(df["state"].value_counts())
+
+        if "assignment_group" in existing and df["assignment_group"].notna().any():
+            with _next_slot():
+                st.markdown("**Top 15 assignment groups**")
+                st.bar_chart(df["assignment_group"].value_counts().head(15))
+
+        if "territory" in existing and df["territory"].notna().any():
+            with _next_slot():
+                st.markdown("**By territory**")
+                st.bar_chart(df["territory"].value_counts())
+
+        if "region" in existing and df["region"].notna().any():
+            with _next_slot():
+                st.markdown("**By region**")
+                st.bar_chart(df["region"].value_counts())
+
+        if lob_col and df[lob_col].notna().any():
+            with _next_slot():
+                st.markdown("**By LOB**")
+                st.bar_chart(df[lob_col].value_counts())
+
+        if "created" in existing:
+            created = pd.to_datetime(df["created"], errors="coerce").dropna()
+            if not created.empty:
+                trend = (
+                    created.dt.to_period("M")
+                    .value_counts()
+                    .sort_index()
+                )
+                trend.index = trend.index.to_timestamp()
+                trend.name = "Created"
+                st.markdown("**Created over time (monthly)**")
+                st.line_chart(trend)

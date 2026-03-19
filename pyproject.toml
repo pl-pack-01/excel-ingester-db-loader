@@ -13,6 +13,9 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
+outlook = [
+    "pywin32>=306",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

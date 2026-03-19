@@ -7,15 +7,15 @@ A simple Streamlit app for loading Excel spreadsheets into a SQLite database. Up
 ## How it works
 
 ```
-Upload .xlsx files in the browser
-        ↓
-Preview columns, data types, and sample rows
-        ↓
-Pick a table name (auto-suggested from filename)
-        ↓
-Load into SQLite
-        ↓
-Power BI connects for reporting
+Upload .xlsx files in the browser          OR          Pull attachments from Outlook
+                              ↓
+             Preview columns, data types, and sample rows
+                              ↓
+             Pick a table name (auto-suggested from filename)
+                              ↓
+                        Load into SQLite
+                              ↓
+                  Power BI connects for reporting
 ```
 
 ## Tech Stack
@@ -26,11 +26,13 @@ Power BI connects for reporting
 | Data processing | pandas + openpyxl |
 | Database | SQLite |
 | Analytics | Power BI Desktop (ODBC) |
+| Outlook integration | pywin32 (Windows only) |
 
 ## Prerequisites
 
 - Python 3.10 or later — [download here](https://www.python.org/downloads/)
 - pip (included with Python)
+- **Outlook integration only:** Microsoft Outlook desktop app installed and a profile configured (Windows only)
 
 ## Setup
 
@@ -52,6 +54,11 @@ Power BI connects for reporting
    pip install streamlit pandas openpyxl
    ```
 
+4. *(Optional)* Enable Outlook integration:
+   ```bash
+   pip install pywin32
+   ```
+
 ## Running the app
 
 ```bash
@@ -62,11 +69,23 @@ This opens the app in your default browser at `http://localhost:8501`. The SQLit
 
 ## Usage
 
+### Uploading files manually
+
 1. Go to the **Upload** tab
 2. Drag and drop one or more `.xlsx` files
 3. Review the preview — edit the target table name if needed
 4. Click **Load** to write to SQLite
 5. Switch to the **Database** tab to browse loaded tables and view data
+
+### Importing from Outlook
+
+1. Go to the **Outlook** tab
+2. Set your filters — *Days back*, *Inbox subfolder* (optional), and *Subject contains* (optional)
+3. Click **Scan for Excel attachments** — the app searches your local Outlook Inbox and lists every `.xlsx`/`.xls` attachment found
+4. Tick the checkboxes next to the attachments you want to import
+5. Click **Import selected** — the files are loaded into SQLite using the same pipeline as manual uploads
+
+> **Note:** Outlook integration uses Windows COM automation (`pywin32`) and requires the Outlook desktop app to be installed and signed in.
 
 The **Admin** sidebar (visible on every tab) lets you:
 
@@ -95,6 +114,7 @@ python -m pytest tests/ -v
 - Column mapping — rename columns before loading
 - PostgreSQL migration — swap SQLite for Postgres when ready
 - AI-assisted table routing and column mapping
+- Outlook: scheduled/automatic polling for new attachments
 
 ---
 
