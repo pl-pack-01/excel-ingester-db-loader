@@ -5,9 +5,10 @@ from pathlib import Path
 import streamlit as st
 import pandas as pd
 
-from db import get_conn, get_tables, DB_PATH, ensure_ingest_log, is_already_ingested, record_ingest
+from db import get_conn, get_tables, drop_table, DB_PATH, ensure_ingest_log, is_already_ingested, record_ingest, ensure_incidents_view
 from ingest import read_excel, table_name_from_filename, normalise_columns, load_to_db
 from outlook import scan_for_attachments
+from servicenow import test_connection, query_table
 
 st.set_page_config(page_title="Excel Data Ingestor", layout="wide")
 st.title("Excel Data Ingestor")
@@ -34,6 +35,7 @@ with st.sidebar:
     st.divider()
     st.subheader("Loaded tables")
     conn = get_conn(db_path)
+    ensure_incidents_view(conn)
     tables = get_tables(conn)
     if tables:
         for t in tables:
@@ -45,7 +47,7 @@ with st.sidebar:
 
 # ── Tabs ────────────────────────────────────────────────────────────────────
 
-upload_tab, outlook_tab, database_tab, charts_tab = st.tabs(["Upload", "Outlook", "Database", "Charts"])
+upload_tab, outlook_tab, servicenow_tab, database_tab, charts_tab = st.tabs(["Upload", "Outlook", "ServiceNow", "Database", "Charts"])
 
 # ── Upload tab ──────────────────────────────────────────────────────────────
 
@@ -214,6 +216,164 @@ with outlook_tab:
         st.info("No Excel attachments found matching those criteria.")
 
 
+# ── ServiceNow tab ──────────────────────────────────────────────────────────
+
+with servicenow_tab:
+    st.subheader("ServiceNow Authentication & Testing")
+    st.caption("Use basic login by default, or switch to API token auth when available.")
+
+    auth_mode = st.radio(
+        "Authentication mode",
+        options=["basic", "bearer"],
+        format_func=lambda mode: "Username + Password" if mode == "basic" else "API Bearer Token",
+        horizontal=True,
+    )
+
+    instance_url = st.text_input(
+        "ServiceNow Instance URL",
+        value=st.session_state.get("sn_instance_url", ""),
+        placeholder="e.g., https://dev12345.service-now.com or dev12345.service-now.com",
+        help="Your ServiceNow instance URL",
+    )
+
+    st.markdown("#### Authentication")
+    with st.form("sn_auth"):
+        username = ""
+        password = ""
+        bearer_token = ""
+
+        if auth_mode == "basic":
+            username = st.text_input(
+                "Username",
+                value=st.session_state.get("sn_username", ""),
+            )
+            password = st.text_input(
+                "Password",
+                value=st.session_state.get("sn_password", ""),
+                type="password",
+                help="Your ServiceNow password (kept in session only)",
+            )
+        else:
+            bearer_token = st.text_input(
+                "Bearer token",
+                value=st.session_state.get("sn_bearer_token", ""),
+                type="password",
+                help="API bearer token (kept in session only)",
+            )
+
+        col1, col2 = st.columns(2)
+        with col1:
+            test_btn = st.form_submit_button("Test connection", use_container_width=True)
+        with col2:
+            clear_btn = st.form_submit_button("Clear", use_container_width=True)
+
+        if test_btn:
+            if not instance_url:
+                st.error("Please provide instance URL.")
+            elif auth_mode == "basic" and (not username or not password):
+                st.error("Please fill in username and password.")
+            elif auth_mode == "bearer" and not bearer_token:
+                st.error("Please provide bearer token.")
+            else:
+                with st.spinner("Testing connection..."):
+                    result = test_connection(
+                        instance_url,
+                        auth_method=auth_mode,
+                        username=username,
+                        password=password,
+                        bearer_token=bearer_token,
+                    )
+                    st.session_state["sn_test_result"] = result
+                    st.session_state["sn_instance_url"] = instance_url
+                    st.session_state["sn_auth_mode"] = auth_mode
+                    if auth_mode == "basic":
+                        st.session_state["sn_username"] = username
+                        st.session_state["sn_password"] = password
+                        st.session_state.pop("sn_bearer_token", None)
+                    else:
+                        st.session_state["sn_bearer_token"] = bearer_token
+                        st.session_state.pop("sn_username", None)
+                        st.session_state.pop("sn_password", None)
+
+        if clear_btn:
+            for key in [
+                "sn_username",
+                "sn_password",
+                "sn_bearer_token",
+                "sn_test_result",
+                "sn_query_result",
+                "sn_instance_url",
+                "sn_auth_mode",
+            ]:
+                st.session_state.pop(key, None)
+            st.rerun()
+    
+    # Display test results
+    result = st.session_state.get("sn_test_result")
+    if result:
+        st.divider()
+        if result["status"] == "success":
+            st.success(result["message"])
+            
+            with st.expander("User information", expanded=True):
+                user_info = result.get("user_info", {})
+                st.json(user_info)
+            
+            with st.expander("Query sample tables"):
+                st.markdown("#### Sample Tables")
+                col1, col2 = st.columns([2, 1])
+                
+                with col1:
+                    table_name = st.selectbox(
+                        "Select a table to query",
+                        options=["incident", "change_request", "problem", "request", "cmn_location", "sys_user"],
+                        index=0,
+                    )
+                
+                with col2:
+                    limit = st.number_input("Limit records", min_value=1, max_value=100, value=10)
+                
+                if st.button("Query table"):
+                    if st.session_state.get("sn_instance_url"):
+                        with st.spinner(f"Querying {table_name}…"):
+                            active_mode = st.session_state.get("sn_auth_mode", "basic")
+                            result = query_table(
+                                st.session_state["sn_instance_url"],
+                                table_name,
+                                auth_method=active_mode,
+                                username=st.session_state.get("sn_username"),
+                                password=st.session_state.get("sn_password"),
+                                bearer_token=st.session_state.get("sn_bearer_token"),
+                                limit=limit,
+                            )
+                            st.session_state["sn_query_result"] = result
+        else:
+            st.error(result.get("message", "Connection failed"))
+    
+    # Display query results
+    query_result = st.session_state.get("sn_query_result")
+    if query_result and query_result.get("status") == "success":
+        st.divider()
+        records = query_result.get("records", [])
+        
+        if records:
+            st.markdown(f"#### {query_result.get('table', 'Results').upper()} ({query_result.get('count')} records)")
+            
+            # Convert to DataFrame for nice display
+            df = pd.DataFrame(records)
+            # Show first 100 columns and truncate long values
+            display_cols = list(df.columns)[:100]
+            st.dataframe(df[display_cols], use_container_width=True, height=400)
+            
+            # Option to view raw JSON
+            with st.expander("Raw JSON"):
+                st.json(records)
+        else:
+            st.info(f"No records found in {query_result.get('table')}")
+    elif query_result and query_result.get("status") == "error":
+        st.error(query_result.get("message", "Query failed"))
+
+
 # ── Database tab ─────────────────────────────────────────────────────────────
 
 with database_tab:
@@ -228,6 +388,29 @@ with database_tab:
                 st.caption(f"Columns: {', '.join(table['columns'])}")
                 df = pd.read_sql(f"SELECT * FROM [{table['name']}] LIMIT 100", conn)
                 st.dataframe(df, use_container_width=True)
+
+                if table["name"].startswith("_"):
+                    st.caption("System table — cannot be deleted.")
+                    continue
+
+                pending_key = f"pending_delete_{table['name']}"
+                if st.button(f"Delete table `{table['name']}`", key=f"del_{table['name']}", type="secondary"):
+                    st.session_state[pending_key] = True
+
+                if st.session_state.get(pending_key):
+                    st.warning(f"This will permanently drop **{table['name']}** and all its data.")
+                    confirm_col, cancel_col = st.columns([1, 5])
+                    with confirm_col:
+                        if st.button("Confirm delete", key=f"confirm_del_{table['name']}", type="primary"):
+                            drop_conn = get_conn(db_path)
+                            drop_table(drop_conn, table['name'])
+                            drop_conn.close()
+                            st.session_state.pop(pending_key, None)
+                            st.rerun()
+                    with cancel_col:
+                        if st.button("Cancel", key=f"cancel_del_{table['name']}"):
+                            st.session_state.pop(pending_key, None)
+                            st.rerun()
 
     conn.close()
 

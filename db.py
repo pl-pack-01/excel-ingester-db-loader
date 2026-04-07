@@ -60,6 +60,12 @@ def is_already_ingested(conn: sqlite3.Connection, filename: str, received_at: st
     return row is not None
 
 
+def drop_table(conn: sqlite3.Connection, table_name: str) -> None:
+    """Drop a table by name."""
+    conn.execute(f"DROP TABLE IF EXISTS [{table_name}]")
+    conn.commit()
+
+
 def record_ingest(
     conn: sqlite3.Connection,
     filename: str,
@@ -75,4 +81,52 @@ def record_ingest(
         (filename, received_at, target_table, rows_loaded,
          datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
     )
+    conn.commit()
+
+
+# ── Reporting views ──────────────────────────────────────────────────────────
+
+def ensure_incidents_view(conn: sqlite3.Connection) -> None:
+    """Create (or replace) the v_incidents_latest view for Power BI reporting.
+
+    The raw incidents table accumulates one row per daily email snapshot, so
+    the same incident number appears ~10 times on average.  This view reduces
+    that to a single row per incident number — the most-recently-ingested
+    snapshot — and adds three calculated fields:
+
+      duration_days        — days from ticket created → latest updated
+      age_days             — days from ticket created → today
+      days_since_last_update — days from latest updated → today
+    """
+    conn.execute("DROP VIEW IF EXISTS v_incidents_latest")
+    conn.execute("""
+        CREATE VIEW v_incidents_latest AS
+        WITH ranked AS (
+            SELECT
+                *,
+                ROW_NUMBER() OVER (
+                    PARTITION BY number
+                    ORDER BY _ingested_at DESC, updated DESC
+                ) AS rn
+            FROM automated_sas_cloud_all_incidents
+        )
+        SELECT
+            number,
+            reporter_lob,
+            territory,
+            region,
+            configuration_item,
+            short_summary,
+            state,
+            assignment_group,
+            assigned_to,
+            created,
+            updated,
+            ROUND(JULIANDAY(updated) - JULIANDAY(created), 1)  AS duration_days,
+            ROUND(JULIANDAY('now')   - JULIANDAY(created), 0)  AS age_days,
+            ROUND(JULIANDAY('now')   - JULIANDAY(updated), 0)  AS days_since_last_update,
+            _ingested_at                                        AS last_seen_at
+        FROM ranked
+        WHERE rn = 1
+    """)
     conn.commit()

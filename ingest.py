@@ -28,7 +28,28 @@ def normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def load_to_db(conn, df: pd.DataFrame, table_name: str, if_exists: str = "replace") -> int:
-    """Write a DataFrame to a SQLite table. Returns rows written."""
+def load_to_db(conn, df: pd.DataFrame, table_name: str, if_exists: str = "append") -> int:
+    """Write a DataFrame to a SQLite table. Returns rows written.
+
+    When appending, any columns present in the existing table but absent from
+    the incoming DataFrame are added as NaN so the insert always succeeds.
+    """
+    if if_exists == "append":
+        existing = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        if existing:
+            existing_cols = [
+                row[1]
+                for row in conn.execute(f"PRAGMA table_info([{table_name}])").fetchall()
+            ]
+            for col in existing_cols:
+                if col not in df.columns:
+                    df = df.copy()
+                    df[col] = None
+            # keep only columns the table knows about, in the right order
+            df = df[[c for c in existing_cols if c in df.columns]]
+
     df.to_sql(table_name, conn, if_exists=if_exists, index=False)
     return len(df)

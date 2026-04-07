@@ -7,17 +7,6 @@ A simple Streamlit app for loading Excel spreadsheets into a SQLite database. Up
 ## How it works
 
 ```
-<<<<<<< HEAD
-Upload .xlsx files in the browser          OR          Pull attachments from Outlook
-                              ↓
-             Preview columns, data types, and sample rows
-                              ↓
-             Pick a table name (auto-suggested from filename)
-                              ↓
-                        Load into SQLite
-                              ↓
-                  Power BI connects for reporting
-=======
 Upload .xlsx files in the browser
         ↓
 Preview columns, data types, and sample rows
@@ -27,7 +16,6 @@ Pick a table name (auto-suggested from filename)
 Load into SQLite
               ↓
 Power BI connects for reporting
->>>>>>> 1b2e95c92cc5adc4747442e60fee97b8f55d1e74
 ```
 
 ## Tech Stack
@@ -126,11 +114,6 @@ python -m pytest tests/ -v
 - Multi-sheet support — select specific sheets from multi-tab workbooks
 - Column mapping — rename columns before loading
 - PostgreSQL migration — swap SQLite for Postgres when ready
-<<<<<<< HEAD
-- AI-assisted table routing and column mapping
-- Outlook: scheduled/automatic polling for new attachments
-=======
->>>>>>> 1b2e95c92cc5adc4747442e60fee97b8f55d1e74
 
 ---
 

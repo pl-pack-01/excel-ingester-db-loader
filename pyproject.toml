@@ -7,6 +7,7 @@ dependencies = [
     "streamlit>=1.30",
     "pandas>=2.0",
     "openpyxl>=3.1",
+    "requests>=2.31",
 ]
 
 [project.optional-dependencies]
@@ -20,3 +21,10 @@ outlook = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+# .streamlit/config.toml
+[server]
+port = 8502
