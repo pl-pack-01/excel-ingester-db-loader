@@ -1,9 +1,13 @@
 """Streamlit app — upload Excel files, preview, and load into SQLite."""
 
+import os
 from pathlib import Path
 
+from dotenv import load_dotenv
 import streamlit as st
 import pandas as pd
+
+load_dotenv()
 
 from db import get_conn, get_tables, drop_table, DB_PATH, ensure_ingest_log, is_already_ingested, record_ingest, ensure_incidents_view
 from ingest import read_excel, table_name_from_filename, normalise_columns, load_to_db
@@ -231,7 +235,7 @@ with servicenow_tab:
 
     instance_url = st.text_input(
         "ServiceNow Instance URL",
-        value=st.session_state.get("sn_instance_url", ""),
+        value=st.session_state.get("sn_instance_url", os.getenv("SN_INSTANCE_URL", "")),
         placeholder="e.g., https://dev12345.service-now.com or dev12345.service-now.com",
         help="Your ServiceNow instance URL",
     )
@@ -245,11 +249,12 @@ with servicenow_tab:
         if auth_mode == "basic":
             username = st.text_input(
                 "Username",
-                value=st.session_state.get("sn_username", ""),
+                value=st.session_state.get("sn_username", os.getenv("SN_USERNAME", "")),
             )
             password = st.text_input(
                 "Password",
-                value=st.session_state.get("sn_password", ""),
+                value=st.session_state.get("sn_password", os.getenv("SN_PASSWORD", "")),
+
                 type="password",
                 help="Your ServiceNow password (kept in session only)",
             )

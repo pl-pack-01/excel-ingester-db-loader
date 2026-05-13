@@ -212,3 +212,181 @@ def query_table(
     
     except Exception as e:
         return {"status": "error", "message": f"Query failed: {str(e)[:200]}"}
+
+
+def oauth_get_token(
+    instance_url: str,
+    client_id: str,
+    client_secret: str,
+    grant_type: str = "password",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    timeout: int = 10,
+) -> dict[str, Any]:
+    """
+    Obtain an OAuth 2.0 access token from ServiceNow.
+
+    Supports grant_type='password' (Resource Owner Password Credentials) and
+    grant_type='client_credentials'.
+
+    Args:
+        instance_url: ServiceNow instance URL (e.g., https://dev12345.service-now.com)
+        client_id: OAuth client ID registered in ServiceNow
+        client_secret: OAuth client secret
+        grant_type: OAuth grant type – 'password' or 'client_credentials'
+        username: User login (required for 'password' grant)
+        password: User password (required for 'password' grant)
+        timeout: Request timeout in seconds
+
+    Returns:
+        Dict with status, access_token, token_type, expires_in, scope, and
+        refresh_token (password grant only).
+    """
+    instance_url = instance_url.rstrip("/")
+    if not instance_url.startswith("http"):
+        instance_url = f"https://{instance_url}"
+
+    if grant_type not in ("password", "client_credentials"):
+        return {"status": "error", "message": f"Unsupported grant_type: {grant_type}"}
+
+    if grant_type == "password" and (not username or not password):
+        return {
+            "status": "error",
+            "message": "Username and password are required for the password grant type.",
+        }
+
+    payload: dict[str, str] = {
+        "grant_type": grant_type,
+        "client_id": client_id,
+        "client_secret": client_secret,
+    }
+    if grant_type == "password":
+        payload["username"] = username  # type: ignore[assignment]
+        payload["password"] = password  # type: ignore[assignment]
+
+    try:
+        response = requests.post(
+            f"{instance_url}/oauth_token.do",
+            data=payload,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=timeout,
+            verify=True,
+        )
+
+        if response.status_code == 401:
+            return {
+                "status": "error",
+                "message": "OAuth authentication failed. Verify client_id, client_secret, and credentials.",
+                "status_code": 401,
+            }
+
+        if response.status_code != 200:
+            return {
+                "status": "error",
+                "message": f"OAuth token request failed: HTTP {response.status_code}: {response.text[:200]}",
+                "status_code": response.status_code,
+            }
+
+        token_data = response.json()
+
+        if "error" in token_data:
+            return {
+                "status": "error",
+                "message": f"OAuth error – {token_data['error']}: {token_data.get('error_description', '')}",
+            }
+
+        return {
+            "status": "success",
+            "access_token": token_data.get("access_token"),
+            "token_type": token_data.get("token_type", "Bearer"),
+            "expires_in": token_data.get("expires_in"),
+            "scope": token_data.get("scope"),
+            "refresh_token": token_data.get("refresh_token"),
+            "message": "OAuth token obtained successfully.",
+        }
+
+    except requests.exceptions.Timeout:
+        return {"status": "error", "message": f"Connection timeout after {timeout}s."}
+    except requests.exceptions.ConnectionError as e:
+        return {"status": "error", "message": f"Connection error: {str(e)[:200]}"}
+    except Exception as e:
+        return {"status": "error", "message": f"Unexpected error: {str(e)[:200]}"}
+
+
+def oauth_refresh_token(
+    instance_url: str,
+    client_id: str,
+    client_secret: str,
+    refresh_token: str,
+    timeout: int = 10,
+) -> dict[str, Any]:
+    """
+    Refresh an OAuth 2.0 access token using a refresh token.
+
+    Args:
+        instance_url: ServiceNow instance URL
+        client_id: OAuth client ID
+        client_secret: OAuth client secret
+        refresh_token: The refresh token obtained from a previous token grant
+        timeout: Request timeout in seconds
+
+    Returns:
+        Dict with status, access_token, token_type, expires_in, scope, and
+        new refresh_token.
+    """
+    instance_url = instance_url.rstrip("/")
+    if not instance_url.startswith("http"):
+        instance_url = f"https://{instance_url}"
+
+    try:
+        response = requests.post(
+            f"{instance_url}/oauth_token.do",
+            data={
+                "grant_type": "refresh_token",
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "refresh_token": refresh_token,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=timeout,
+            verify=True,
+        )
+
+        if response.status_code == 401:
+            return {
+                "status": "error",
+                "message": "Token refresh failed: invalid or expired refresh token.",
+                "status_code": 401,
+            }
+
+        if response.status_code != 200:
+            return {
+                "status": "error",
+                "message": f"Token refresh failed: HTTP {response.status_code}: {response.text[:200]}",
+                "status_code": response.status_code,
+            }
+
+        token_data = response.json()
+
+        if "error" in token_data:
+            return {
+                "status": "error",
+                "message": f"OAuth error – {token_data['error']}: {token_data.get('error_description', '')}",
+            }
+
+        return {
+            "status": "success",
+            "access_token": token_data.get("access_token"),
+            "token_type": token_data.get("token_type", "Bearer"),
+            "expires_in": token_data.get("expires_in"),
+            "scope": token_data.get("scope"),
+            "refresh_token": token_data.get("refresh_token"),
+            "message": "OAuth token refreshed successfully.",
+        }
+
+    except requests.exceptions.Timeout:
+        return {"status": "error", "message": f"Connection timeout after {timeout}s."}
+    except requests.exceptions.ConnectionError as e:
+        return {"status": "error", "message": f"Connection error: {str(e)[:200]}"}
+    except Exception as e:
+        return {"status": "error", "message": f"Unexpected error: {str(e)[:200]}"}
