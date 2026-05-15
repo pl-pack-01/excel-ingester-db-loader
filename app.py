@@ -1,246 +1,82 @@
-"""Streamlit app — upload Excel files, preview, and load into SQLite."""
+"""Streamlit app for ingesting ServiceNow data into SQLite and analyzing trends."""
+
+from __future__ import annotations
 
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
-import streamlit as st
 import pandas as pd
+import streamlit as st
+from dotenv import load_dotenv
+
+from db import (
+    DB_PATH,
+    drop_table,
+    ensure_servicenow_schema,
+    get_conn,
+    get_tables,
+    store_servicenow_snapshot,
+)
+from servicenow import pull_operational_snapshot, test_connection
 
 load_dotenv()
 
-from db import get_conn, get_tables, drop_table, DB_PATH, ensure_ingest_log, is_already_ingested, record_ingest, ensure_incidents_view
-from ingest import read_excel, table_name_from_filename, normalise_columns, load_to_db
-from outlook import scan_for_attachments
-from servicenow import test_connection, query_table
+st.set_page_config(page_title="ServiceNow Trend Ingestor", layout="wide")
+st.title("ServiceNow Trend Ingestor")
+st.caption(
+    "Pull incidents/requests (plus optional changes/problems) from ServiceNow into SQLite snapshots for trend analysis."
+)
 
-st.set_page_config(page_title="Excel Data Ingestor", layout="wide")
-st.title("Excel Data Ingestor")
-
-# ── Sidebar: Admin ──────────────────────────────────────────────────────────
+# --- Sidebar ----------------------------------------------------------------
 
 with st.sidebar:
     st.header("Admin")
 
-    st.subheader("Database connection")
+    st.subheader("Database")
     db_path = st.text_input("SQLite path", value=st.session_state.get("db_path", DB_PATH))
     st.session_state["db_path"] = db_path
 
     resolved = Path(db_path).resolve()
     if resolved.exists():
         size_kb = resolved.stat().st_size / 1024
-        if size_kb < 1024:
-            st.caption(f"File: {resolved}  \nSize: {size_kb:.1f} KB")
-        else:
-            st.caption(f"File: {resolved}  \nSize: {size_kb / 1024:.2f} MB")
+        size_txt = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.2f} MB"
+        st.caption(f"File: {resolved}  \\nSize: {size_txt}")
     else:
-        st.caption(f"File: {resolved}  \nDatabase will be created on first load.")
+        st.caption(f"File: {resolved}  \\nDatabase will be created on first sync.")
 
-    st.divider()
-    st.subheader("Loaded tables")
     conn = get_conn(db_path)
-    ensure_incidents_view(conn)
-    tables = get_tables(conn)
-    if tables:
-        for t in tables:
-            st.markdown(f"**{t['name']}** — {t['row_count']} rows, {len(t['columns'])} cols")
-    else:
-        st.caption("No tables yet.")
+    ensure_servicenow_schema(conn)
+    objects = get_tables(conn)
     conn.close()
 
-
-# ── Tabs ────────────────────────────────────────────────────────────────────
-
-upload_tab, outlook_tab, servicenow_tab, database_tab, charts_tab = st.tabs(["Upload", "Outlook", "ServiceNow", "Database", "Charts"])
-
-# ── Upload tab ──────────────────────────────────────────────────────────────
-
-with upload_tab:
-    files = st.file_uploader(
-        "Upload Excel files",
-        type=["xlsx", "xls"],
-        accept_multiple_files=True,
-    )
-
-    if files:
-        for file in files:
-            st.divider()
-            df = read_excel(file)
-            df = normalise_columns(df)
-
-            suggested = table_name_from_filename(file.name)
-            col1, col2 = st.columns([1, 3])
-
-            with col1:
-                table_name = st.text_input(
-                    "Table name",
-                    value=suggested,
-                    key=f"table_{file.name}",
-                )
-                st.caption(f"{len(df)} rows, {len(df.columns)} columns")
-
-            with col2:
-                st.dataframe(df.head(10), use_container_width=True)
-
-            if st.button(f"Load **{file.name}**", key=f"load_{file.name}"):
-                conn = get_conn(db_path)
-                rows = load_to_db(conn, df, table_name)
-                conn.close()
-                st.success(f"Loaded {rows} rows into `{table_name}`")
-                st.rerun()
-
-# ── Outlook tab ─────────────────────────────────────────────────────────────
-
-with outlook_tab:
-    st.subheader("Import from Outlook")
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        days_back = st.number_input("Days back", min_value=1, value=30)
-    with col2:
-        subfolder = st.text_input("Inbox subfolder (optional)", value="")
-    with col3:
-        subject_filter = st.text_input("Subject contains (optional)", value="")
-
-    if st.button("Scan for Excel attachments"):
-        with st.spinner("Scanning Outlook…"):
-            try:
-                attachments, diag = scan_for_attachments(
-                    subfolder=subfolder,
-                    days_back=int(days_back),
-                    subject_filter=subject_filter,
-                )
-                st.session_state["outlook_attachments"] = attachments
-                st.session_state["outlook_diag"] = diag
-            except Exception as e:
-                st.error(str(e))
-                st.session_state.pop("outlook_attachments", None)
-                st.session_state.pop("outlook_diag", None)
-
-    attachments = st.session_state.get("outlook_attachments")
-    diag = st.session_state.get("outlook_diag")
-
-    if diag is not None:
-        st.caption(
-            f"Folder: **{diag.folder_name}** · "
-            f"Date range: {diag.date_from} → {diag.date_to}"
-        )
-
-        with st.expander("Scan details", expanded=(len(attachments) == 0)):
-            st.table(
-                pd.DataFrame(
-                    [
-                        ("Total items in folder", diag.total_items),
-                        ("Skipped — not a mail item", diag.skipped_non_mail),
-                        ("Skipped — older than date range", diag.skipped_too_old),
-                        ("In date range", diag.in_date_range),
-                        ("Skipped — no attachments", diag.skipped_no_attachment),
-                        ("Skipped — subject filter", diag.skipped_subject_filter),
-                        ("Skipped — non-Excel attachment", diag.skipped_non_excel),
-                        ("Excel attachments found", diag.excel_attachments_found),
-                    ],
-                    columns=["Stage", "Count"],
-                )
-            )
-            if diag.errors:
-                st.warning(f"{len(diag.errors)} error(s) during scan:")
-                for err in diag.errors:
-                    st.code(err, language=None)
-
-        if attachments:
-            conn_check = get_conn(db_path)
-            ensure_ingest_log(conn_check)
-            already_ingested = {
-                i
-                for i, a in enumerate(attachments)
-                if is_already_ingested(conn_check, a.filename, a.received)
-            }
-            conn_check.close()
-
-            select_all = st.checkbox(
-                "Select all for import",
-                value=st.session_state.get("outlook_select_all", False),
-                key="outlook_select_all",
-            )
-
-            att_df = pd.DataFrame(
-                [
-                    {
-                        "Import": select_all and i not in already_ingested,
-                        "Already imported": i in already_ingested,
-                        "Subject": a.subject,
-                        "From": a.sender,
-                        "Received": a.received,
-                        "Filename": a.filename,
-                    }
-                    for i, a in enumerate(attachments)
-                ]
-            )
-
-            edited = st.data_editor(
-                att_df,
-                column_config={
-                    "Import": st.column_config.CheckboxColumn("Import", default=False),
-                    "Already imported": st.column_config.CheckboxColumn("Already imported"),
-                },
-                disabled=["Already imported", "Subject", "From", "Received", "Filename"],
-                use_container_width=True,
-                hide_index=True,
-                key=f"outlook_table_{select_all}_{st.session_state.get('outlook_import_version', 0)}",
-            )
-
-            selected_indices = edited.index[edited["Import"]].tolist()
-
-            if selected_indices and st.button(f"Import {len(selected_indices)} selected"):
-                conn = get_conn(db_path)
-                ensure_ingest_log(conn)
-                for idx in selected_indices:
-                    att = attachments[idx]
-                    if is_already_ingested(conn, att.filename, att.received):
-                        st.warning(f"Skipped **{att.filename}** — already imported (received {att.received})")
-                        continue
-                    try:
-                        df = read_excel(att.temp_path)
-                        df = normalise_columns(df)
-                        df["_source_file"] = att.filename
-                        df["_ingested_at"] = att.received
-                        table = table_name_from_filename(att.filename)
-                        rows = load_to_db(conn, df, table)
-                        record_ingest(conn, att.filename, att.received, table, rows)
-                        st.success(f"Loaded {rows} rows from **{att.filename}** into `{table}`")
-                    except Exception as e:
-                        st.error(f"Failed to import **{att.filename}**: {e}")
-                conn.close()
-                st.session_state["outlook_import_version"] = (
-                    st.session_state.get("outlook_import_version", 0) + 1
-                )
-                st.rerun()
-
-    elif "outlook_diag" in st.session_state:
-        st.info("No Excel attachments found matching those criteria.")
+    st.divider()
+    st.subheader("Objects")
+    for obj in objects:
+        suffix = "rows" if obj["row_count"] is not None else "n/a"
+        count = obj["row_count"] if obj["row_count"] is not None else "-"
+        st.markdown(f"**{obj['name']}** ({obj['type']}) - {count} {suffix}")
 
 
-# ── ServiceNow tab ──────────────────────────────────────────────────────────
+sync_tab, trends_tab, database_tab = st.tabs(["ServiceNow Sync", "Trends", "Database"])
 
-with servicenow_tab:
-    st.subheader("ServiceNow Authentication & Testing")
-    st.caption("Use basic login by default, or switch to API token auth when available.")
+# --- ServiceNow Sync --------------------------------------------------------
+
+with sync_tab:
+    st.subheader("ServiceNow connection")
 
     auth_mode = st.radio(
         "Authentication mode",
         options=["basic", "bearer"],
-        format_func=lambda mode: "Username + Password" if mode == "basic" else "API Bearer Token",
+        format_func=lambda mode: "Username + Password" if mode == "basic" else "Bearer Token",
         horizontal=True,
     )
 
     instance_url = st.text_input(
         "ServiceNow Instance URL",
         value=st.session_state.get("sn_instance_url", os.getenv("SN_INSTANCE_URL", "")),
-        placeholder="e.g., https://dev12345.service-now.com or dev12345.service-now.com",
-        help="Your ServiceNow instance URL",
+        placeholder="https://dev12345.service-now.com",
     )
 
-    st.markdown("#### Authentication")
     with st.form("sn_auth"):
         username = ""
         password = ""
@@ -254,33 +90,30 @@ with servicenow_tab:
             password = st.text_input(
                 "Password",
                 value=st.session_state.get("sn_password", os.getenv("SN_PASSWORD", "")),
-
                 type="password",
-                help="Your ServiceNow password (kept in session only)",
             )
         else:
             bearer_token = st.text_input(
                 "Bearer token",
                 value=st.session_state.get("sn_bearer_token", ""),
                 type="password",
-                help="API bearer token (kept in session only)",
             )
 
-        col1, col2 = st.columns(2)
+        col1, col2 = st.columns([1, 1])
         with col1:
             test_btn = st.form_submit_button("Test connection", use_container_width=True)
         with col2:
-            clear_btn = st.form_submit_button("Clear", use_container_width=True)
+            clear_btn = st.form_submit_button("Clear session", use_container_width=True)
 
         if test_btn:
             if not instance_url:
-                st.error("Please provide instance URL.")
+                st.error("Instance URL is required.")
             elif auth_mode == "basic" and (not username or not password):
-                st.error("Please fill in username and password.")
+                st.error("Username and password are required for basic auth.")
             elif auth_mode == "bearer" and not bearer_token:
-                st.error("Please provide bearer token.")
+                st.error("Bearer token is required.")
             else:
-                with st.spinner("Testing connection..."):
+                with st.spinner("Testing ServiceNow connection..."):
                     result = test_connection(
                         instance_url,
                         auth_method=auth_mode,
@@ -288,215 +121,362 @@ with servicenow_tab:
                         password=password,
                         bearer_token=bearer_token,
                     )
-                    st.session_state["sn_test_result"] = result
-                    st.session_state["sn_instance_url"] = instance_url
-                    st.session_state["sn_auth_mode"] = auth_mode
-                    if auth_mode == "basic":
-                        st.session_state["sn_username"] = username
-                        st.session_state["sn_password"] = password
-                        st.session_state.pop("sn_bearer_token", None)
-                    else:
-                        st.session_state["sn_bearer_token"] = bearer_token
-                        st.session_state.pop("sn_username", None)
-                        st.session_state.pop("sn_password", None)
+                st.session_state["sn_test_result"] = result
+                st.session_state["sn_instance_url"] = instance_url
+                st.session_state["sn_auth_mode"] = auth_mode
+                if auth_mode == "basic":
+                    st.session_state["sn_username"] = username
+                    st.session_state["sn_password"] = password
+                    st.session_state.pop("sn_bearer_token", None)
+                else:
+                    st.session_state["sn_bearer_token"] = bearer_token
+                    st.session_state.pop("sn_username", None)
+                    st.session_state.pop("sn_password", None)
 
         if clear_btn:
             for key in [
+                "sn_test_result",
+                "sn_sync_result",
+                "sn_instance_url",
+                "sn_auth_mode",
                 "sn_username",
                 "sn_password",
                 "sn_bearer_token",
-                "sn_test_result",
-                "sn_query_result",
-                "sn_instance_url",
-                "sn_auth_mode",
             ]:
                 st.session_state.pop(key, None)
             st.rerun()
-    
-    # Display test results
+
     result = st.session_state.get("sn_test_result")
     if result:
-        st.divider()
-        if result["status"] == "success":
-            st.success(result["message"])
-            
-            with st.expander("User information", expanded=True):
-                user_info = result.get("user_info", {})
-                st.json(user_info)
-            
-            with st.expander("Query sample tables"):
-                st.markdown("#### Sample Tables")
-                col1, col2 = st.columns([2, 1])
-                
-                with col1:
-                    table_name = st.selectbox(
-                        "Select a table to query",
-                        options=["incident", "change_request", "problem", "request", "cmn_location", "sys_user"],
-                        index=0,
-                    )
-                
-                with col2:
-                    limit = st.number_input("Limit records", min_value=1, max_value=100, value=10)
-                
-                if st.button("Query table"):
-                    if st.session_state.get("sn_instance_url"):
-                        with st.spinner(f"Querying {table_name}…"):
-                            active_mode = st.session_state.get("sn_auth_mode", "basic")
-                            result = query_table(
-                                st.session_state["sn_instance_url"],
-                                table_name,
-                                auth_method=active_mode,
-                                username=st.session_state.get("sn_username"),
-                                password=st.session_state.get("sn_password"),
-                                bearer_token=st.session_state.get("sn_bearer_token"),
-                                limit=limit,
-                            )
-                            st.session_state["sn_query_result"] = result
+        if result.get("status") == "success":
+            st.success(result.get("message", "Connected"))
+            st.json(result.get("user_info", {}))
         else:
             st.error(result.get("message", "Connection failed"))
-    
-    # Display query results
-    query_result = st.session_state.get("sn_query_result")
-    if query_result and query_result.get("status") == "success":
-        st.divider()
-        records = query_result.get("records", [])
-        
-        if records:
-            st.markdown(f"#### {query_result.get('table', 'Results').upper()} ({query_result.get('count')} records)")
-            
-            # Convert to DataFrame for nice display
-            df = pd.DataFrame(records)
-            # Show first 100 columns and truncate long values
-            display_cols = list(df.columns)[:100]
-            st.dataframe(df[display_cols], use_container_width=True, height=400)
-            
-            # Option to view raw JSON
-            with st.expander("Raw JSON"):
-                st.json(records)
+
+    st.divider()
+    st.subheader("Snapshot sync")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        since_days = st.number_input("Lookback days", min_value=1, max_value=365, value=30)
+    with col2:
+        incident_cap = st.number_input("Incident max records", min_value=100, max_value=50000, value=5000, step=100)
+    with col3:
+        request_cap = st.number_input("Request item max records", min_value=100, max_value=50000, value=5000, step=100)
+
+    include_change_requests = st.checkbox("Include change requests", value=False)
+    include_problems = st.checkbox("Include problems", value=False)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        change_cap = st.number_input(
+            "Change request max records",
+            min_value=100,
+            max_value=50000,
+            value=3000,
+            step=100,
+            disabled=not include_change_requests,
+        )
+    with c2:
+        problem_cap = st.number_input(
+            "Problem max records",
+            min_value=100,
+            max_value=50000,
+            value=3000,
+            step=100,
+            disabled=not include_problems,
+        )
+
+    can_sync = result and result.get("status") == "success"
+    if st.button("Run snapshot sync", disabled=not can_sync):
+        with st.spinner("Pulling incidents and request items from ServiceNow..."):
+            sync_result = pull_operational_snapshot(
+                st.session_state.get("sn_instance_url", ""),
+                auth_method=st.session_state.get("sn_auth_mode", "basic"),
+                username=st.session_state.get("sn_username"),
+                password=st.session_state.get("sn_password"),
+                bearer_token=st.session_state.get("sn_bearer_token"),
+                since_days=int(since_days),
+                incident_max_records=int(incident_cap),
+                request_item_max_records=int(request_cap),
+                include_change_requests=include_change_requests,
+                include_problems=include_problems,
+                change_request_max_records=int(change_cap),
+                problem_max_records=int(problem_cap),
+            )
+
+        if sync_result.get("status") != "success":
+            st.error(sync_result.get("message", "Sync failed"))
         else:
-            st.info(f"No records found in {query_result.get('table')}")
-    elif query_result and query_result.get("status") == "error":
-        st.error(query_result.get("message", "Query failed"))
+            conn = get_conn(db_path)
+            write_result = store_servicenow_snapshot(conn, sync_result)
+            conn.close()
+
+            st.session_state["sn_sync_result"] = {
+                **sync_result,
+                "write_result": write_result,
+            }
+            st.success(
+                "Sync complete. "
+                f"Stored {write_result['incident_rows']} incidents and "
+                f"{write_result['request_item_rows']} request items"
+                f"; {write_result['change_request_rows']} change requests"
+                f"; {write_result['problem_rows']} problems"
+                f" for snapshot {write_result['snapshot_date']}."
+            )
+
+    sync_result = st.session_state.get("sn_sync_result")
+    if sync_result:
+        with st.expander("Latest sync details", expanded=False):
+            st.json(
+                {
+                    "snapshot_date": sync_result.get("snapshot_date"),
+                    "pulled_at": sync_result.get("pulled_at"),
+                    "since_days": sync_result.get("since_days"),
+                    "incident_count": sync_result.get("incident_count"),
+                    "request_item_count": sync_result.get("request_item_count"),
+                    "change_request_count": sync_result.get("change_request_count"),
+                    "problem_count": sync_result.get("problem_count"),
+                    "write_result": sync_result.get("write_result"),
+                }
+            )
+
+    st.divider()
+    st.subheader("Scheduler setup helper")
+    st.caption("Generate Task Scheduler values from your current sync options.")
+
+    if st.button("Generate scheduler command"):
+        workspace_dir = Path(__file__).resolve().parent
+        default_python = workspace_dir / ".venv" / "Scripts" / "python.exe"
+
+        program_script = str(default_python) if default_python.exists() else "python"
+        start_in = str(workspace_dir)
+
+        arg_parts = [
+            "sync_snapshot.py",
+            f"--since-days {int(since_days)}",
+            f"--incident-max {int(incident_cap)}",
+            f"--request-max {int(request_cap)}",
+            f"--auth-mode {auth_mode}",
+        ]
+
+        if instance_url:
+            arg_parts.append(f'--instance-url "{instance_url}"')
+
+        if auth_mode == "basic" and username:
+            arg_parts.append(f'--username "{username}"')
+
+        if include_change_requests:
+            arg_parts.append("--include-change-requests")
+            arg_parts.append(f"--change-max {int(change_cap)}")
+
+        if include_problems:
+            arg_parts.append("--include-problems")
+            arg_parts.append(f"--problem-max {int(problem_cap)}")
+
+        add_args = " ".join(arg_parts)
+        task_name = "ServiceNow Snapshot Sync"
+
+        schtasks_cmd = (
+            "schtasks /Create /F "
+            f'/TN "{task_name}" '
+            f'/TR "{program_script} {add_args}" '
+            "/SC DAILY /ST 06:00"
+        )
+
+        st.markdown("**Task Scheduler fields**")
+        st.code(
+            f"Program/script:\n{program_script}\n\n"
+            f"Add arguments:\n{add_args}\n\n"
+            f"Start in:\n{start_in}",
+            language="text",
+        )
+
+        st.markdown("**PowerShell command (optional)**")
+        st.code(schtasks_cmd, language="powershell")
+
+        st.info(
+            "Security note: keep password/token in .env or Windows credential tooling. "
+            "This helper does not include secrets in generated arguments."
+        )
 
 
-# ── Database tab ─────────────────────────────────────────────────────────────
+# --- Trends -----------------------------------------------------------------
+
+with trends_tab:
+    conn = get_conn(db_path)
+    ensure_servicenow_schema(conn)
+
+    runs_df = pd.read_sql("SELECT * FROM v_snapshot_run_summary LIMIT 200", conn)
+    if runs_df.empty:
+        st.info("No snapshots yet. Run a ServiceNow sync first.")
+        conn.close()
+    else:
+        st.subheader("Snapshot history")
+        st.dataframe(runs_df, use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.subheader("Incident trends over time")
+
+        daily_incident = pd.read_sql(
+            """
+            SELECT snapshot_date, SUM(ticket_count) AS total_incidents, SUM(open_count) AS open_incidents
+            FROM v_incident_trends_daily
+            GROUP BY snapshot_date
+            ORDER BY snapshot_date
+            """,
+            conn,
+        )
+        if not daily_incident.empty:
+            daily_incident["snapshot_date"] = pd.to_datetime(daily_incident["snapshot_date"], errors="coerce")
+            daily_incident = daily_incident.set_index("snapshot_date")
+            st.line_chart(daily_incident[["total_incidents", "open_incidents"]])
+
+        incident_sla = pd.read_sql(
+            """
+            SELECT snapshot_date, SUM(resolved_count) AS resolved_count, SUM(breached_count) AS breached_count
+            FROM v_incident_sla_daily
+            GROUP BY snapshot_date
+            ORDER BY snapshot_date
+            """,
+            conn,
+        )
+        if not incident_sla.empty:
+            incident_sla["snapshot_date"] = pd.to_datetime(incident_sla["snapshot_date"], errors="coerce")
+            incident_sla = incident_sla.set_index("snapshot_date")
+            st.caption("Incident SLA trend (resolved vs breached)")
+            st.line_chart(incident_sla[["resolved_count", "breached_count"]])
+
+        top_categories = pd.read_sql(
+            """
+            SELECT category, SUM(ticket_count) AS tickets
+            FROM v_incident_trends_daily
+            GROUP BY category
+            ORDER BY tickets DESC
+            LIMIT 15
+            """,
+            conn,
+        )
+        if not top_categories.empty:
+            st.caption("Top incident categories across all snapshots")
+            st.bar_chart(top_categories.set_index("category"))
+
+        st.divider()
+        st.subheader("Request type trends over time")
+
+        daily_requests = pd.read_sql(
+            """
+            SELECT snapshot_date, SUM(request_count) AS total_requests, SUM(open_count) AS open_requests
+            FROM v_request_type_trends_daily
+            GROUP BY snapshot_date
+            ORDER BY snapshot_date
+            """,
+            conn,
+        )
+        if not daily_requests.empty:
+            daily_requests["snapshot_date"] = pd.to_datetime(daily_requests["snapshot_date"], errors="coerce")
+            daily_requests = daily_requests.set_index("snapshot_date")
+            st.line_chart(daily_requests[["total_requests", "open_requests"]])
+
+        top_request_types = pd.read_sql(
+            """
+            SELECT request_type, SUM(request_count) AS requests
+            FROM v_request_type_trends_daily
+            GROUP BY request_type
+            ORDER BY requests DESC
+            LIMIT 15
+            """,
+            conn,
+        )
+        if not top_request_types.empty:
+            st.caption("Top request types (catalog items) across all snapshots")
+            st.bar_chart(top_request_types.set_index("request_type"))
+
+        change_daily = pd.read_sql(
+            """
+            SELECT snapshot_date, SUM(change_count) AS total_changes, SUM(open_count) AS open_changes
+            FROM v_change_request_trends_daily
+            GROUP BY snapshot_date
+            ORDER BY snapshot_date
+            """,
+            conn,
+        )
+        if not change_daily.empty:
+            st.divider()
+            st.subheader("Change request trends")
+            change_daily["snapshot_date"] = pd.to_datetime(change_daily["snapshot_date"], errors="coerce")
+            change_daily = change_daily.set_index("snapshot_date")
+            st.line_chart(change_daily[["total_changes", "open_changes"]])
+
+        problem_daily = pd.read_sql(
+            """
+            SELECT snapshot_date, SUM(problem_count) AS total_problems, SUM(open_count) AS open_problems
+            FROM v_problem_trends_daily
+            GROUP BY snapshot_date
+            ORDER BY snapshot_date
+            """,
+            conn,
+        )
+        if not problem_daily.empty:
+            st.divider()
+            st.subheader("Problem trends")
+            problem_daily["snapshot_date"] = pd.to_datetime(problem_daily["snapshot_date"], errors="coerce")
+            problem_daily = problem_daily.set_index("snapshot_date")
+            st.line_chart(problem_daily[["total_problems", "open_problems"]])
+
+        st.divider()
+        st.subheader("How to analyze trend data")
+        st.markdown(
+            """
+            1. Use `snapshot_date` as the x-axis in Power BI or SQL queries.
+            2. Use `v_incident_trends_daily` for incident volume/open-close patterns by category and state.
+            3. Use `v_request_type_trends_daily` for request type adoption and backlog trends.
+            4. Use `v_incident_sla_daily` for resolved/breached SLA trend lines by day and priority.
+            5. Use `v_change_request_trends_daily` and `v_problem_trends_daily` when those domains are enabled.
+            6. Use `v_incident_latest` and `v_request_item_latest` when you only want the latest known state.
+            """
+        )
+
+        conn.close()
+
+
+# --- Database ---------------------------------------------------------------
 
 with database_tab:
     conn = get_conn(db_path)
-    tables = get_tables(conn)
-
-    if not tables:
-        st.info("No tables yet. Upload some files first.")
+    objs = get_tables(conn)
+    if not objs:
+        st.info("Database is empty.")
     else:
-        for table in tables:
-            with st.expander(f"**{table['name']}** — {table['row_count']} rows"):
-                st.caption(f"Columns: {', '.join(table['columns'])}")
-                df = pd.read_sql(f"SELECT * FROM [{table['name']}] LIMIT 100", conn)
-                st.dataframe(df, use_container_width=True)
+        for obj in objs:
+            with st.expander(f"{obj['name']} ({obj['type']})"):
+                st.caption(f"Columns: {', '.join(obj['columns'])}")
 
-                if table["name"].startswith("_"):
-                    st.caption("System table — cannot be deleted.")
+                try:
+                    preview = pd.read_sql(f"SELECT * FROM [{obj['name']}] LIMIT 100", conn)
+                    st.dataframe(preview, use_container_width=True)
+                except Exception as exc:
+                    st.warning(f"Could not preview object: {exc}")
+
+                if obj["type"] == "view" or obj["name"].startswith("_"):
+                    st.caption("Protected object. Deletion disabled.")
                     continue
 
-                pending_key = f"pending_delete_{table['name']}"
-                if st.button(f"Delete table `{table['name']}`", key=f"del_{table['name']}", type="secondary"):
+                pending_key = f"pending_delete_{obj['name']}"
+                if st.button(f"Delete table {obj['name']}", key=f"del_{obj['name']}"):
                     st.session_state[pending_key] = True
 
                 if st.session_state.get(pending_key):
-                    st.warning(f"This will permanently drop **{table['name']}** and all its data.")
-                    confirm_col, cancel_col = st.columns([1, 5])
-                    with confirm_col:
-                        if st.button("Confirm delete", key=f"confirm_del_{table['name']}", type="primary"):
-                            drop_conn = get_conn(db_path)
-                            drop_table(drop_conn, table['name'])
-                            drop_conn.close()
+                    st.warning(f"This will permanently remove {obj['name']}.")
+                    c1, c2 = st.columns([1, 3])
+                    with c1:
+                        if st.button("Confirm", key=f"confirm_del_{obj['name']}"):
+                            drop_table(conn, obj["name"])
                             st.session_state.pop(pending_key, None)
                             st.rerun()
-                    with cancel_col:
-                        if st.button("Cancel", key=f"cancel_del_{table['name']}"):
+                    with c2:
+                        if st.button("Cancel", key=f"cancel_del_{obj['name']}"):
                             st.session_state.pop(pending_key, None)
                             st.rerun()
 
     conn.close()
-
-# ── Charts tab ───────────────────────────────────────────────────────────────
-
-with charts_tab:
-    conn = get_conn(db_path)
-    all_tables = get_tables(conn)
-    data_tables = [t for t in all_tables if not t["name"].startswith("_")]
-
-    if not data_tables:
-        st.info("No data tables yet. Import some files first.")
-        conn.close()
-    else:
-        # ── Volume overview ──────────────────────────────────────────────────
-        st.subheader("Volume by table")
-        overview_df = (
-            pd.DataFrame({"Rows": {t["name"]: t["row_count"] for t in data_tables}})
-            .sort_values("Rows")
-        )
-        st.bar_chart(overview_df, horizontal=True)
-
-        st.divider()
-
-        # ── Per-table deep-dive ──────────────────────────────────────────────
-        st.subheader("Deep dive")
-        selected_table = st.selectbox(
-            "Select a table",
-            [t["name"] for t in data_tables],
-            key="charts_table",
-        )
-
-        df = pd.read_sql(f"SELECT * FROM [{selected_table}]", conn)
-        conn.close()
-        existing = set(df.columns)
-        lob_col = "lob" if "lob" in existing else "reporter_lob" if "reporter_lob" in existing else None
-
-        left, right = st.columns(2)
-        slot = [left, right]
-        slot_idx = 0
-
-        def _next_slot():
-            global slot_idx
-            c = slot[slot_idx % 2]
-            slot_idx += 1
-            return c
-
-        if "state" in existing:
-            with _next_slot():
-                st.markdown("**By state**")
-                st.bar_chart(df["state"].value_counts())
-
-        if "assignment_group" in existing and df["assignment_group"].notna().any():
-            with _next_slot():
-                st.markdown("**Top 15 assignment groups**")
-                st.bar_chart(df["assignment_group"].value_counts().head(15))
-
-        if "territory" in existing and df["territory"].notna().any():
-            with _next_slot():
-                st.markdown("**By territory**")
-                st.bar_chart(df["territory"].value_counts())
-
-        if "region" in existing and df["region"].notna().any():
-            with _next_slot():
-                st.markdown("**By region**")
-                st.bar_chart(df["region"].value_counts())
-
-        if lob_col and df[lob_col].notna().any():
-            with _next_slot():
-                st.markdown("**By LOB**")
-                st.bar_chart(df[lob_col].value_counts())
-
-        if "created" in existing:
-            created = pd.to_datetime(df["created"], errors="coerce").dropna()
-            if not created.empty:
-                trend = (
-                    created.dt.to_period("M")
-                    .value_counts()
-                    .sort_index()
-                )
-                trend.index = trend.index.to_timestamp()
-                trend.name = "Created"
-                st.markdown("**Created over time (monthly)**")
-                st.line_chart(trend)

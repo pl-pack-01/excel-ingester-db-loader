@@ -1,120 +1,188 @@
-# Excel Data Ingestor
+# ServiceNow Trend Ingestor
 
-A simple Streamlit app for loading Excel spreadsheets into a SQLite database. Upload files, preview the data, and query from Power BI.
+A Streamlit app that pulls operational data directly from ServiceNow and stores daily snapshots in SQLite so you can analyze trends for incidents and request types over time.
 
----
+## What changed
 
-## How it works
+This project no longer depends on Excel spreadsheets as its primary source.
 
-```
-Upload .xlsx files in the browser
-        ↓
-Preview columns, data types, and sample rows
-              ↓
-Pick a table name (auto-suggested from filename)
-              ↓
-Load into SQLite
-              ↓
-Power BI connects for reporting
+Data now flows like this:
+
+```text
+ServiceNow REST API
+    -> Snapshot pull (incident + sc_req_item + optional change/problem)
+    -> SQLite snapshot tables
+    -> SQL trend views
+    -> Streamlit charts / Power BI
 ```
 
-## Tech Stack
+## Why snapshots matter for trends
 
-| Layer | Technology |
-|---|---|
-| UI | Streamlit |
-| Data processing | pandas + openpyxl |
-| Database | SQLite |
-| Analytics | Power BI Desktop (ODBC) |
-| Outlook integration | pywin32 (Windows only) |
+ServiceNow tables represent current state. To analyze trends over time (volume, backlog, open vs closed), you need historical snapshots.
 
-## Prerequisites
+Each sync run stores:
+- `snapshot_date` (business date for the pull)
+- `pulled_at` (exact timestamp)
+- incident rows
+- request item rows
+- optional change request rows
+- optional problem rows
 
-- Python 3.10 or later — [download here](https://www.python.org/downloads/)
-- pip (included with Python)
-- **Outlook integration only:** Microsoft Outlook desktop app installed and a profile configured (Windows only)
+Over time, this creates a time series without modifying ServiceNow itself.
+
+## Tech stack
+
+- UI: Streamlit
+- API access: requests
+- Data layer: SQLite
+- Analytics: SQL views + Power BI
 
 ## Setup
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/your-username/excel-ingester-db-loader.git
-   cd excel-ingester-db-loader
-   ```
+1. Create and activate a virtual environment.
+2. Install dependencies:
 
-2. Create a virtual environment (recommended):
-   ```bash
-   python -m venv .venv
-   .venv\Scripts\activate        # Windows
-   # source .venv/bin/activate   # macOS / Linux
-   ```
+```bash
+pip install -e .
+```
 
-3. Install dependencies:
-   ```bash
-   pip install streamlit pandas openpyxl
-   ```
+3. Configure environment variables (optional, can also be entered in app UI):
 
-4. *(Optional)* Enable Outlook integration:
-   ```bash
-   pip install pywin32
-   ```
+```env
+SN_INSTANCE_URL=https://your-instance.service-now.com
+SN_USERNAME=your_user
+SN_PASSWORD=your_password
+```
 
-## Running the app
+4. Run the app:
 
 ```bash
 streamlit run app.py
 ```
 
-This opens the app in your default browser at `http://localhost:8501`. The SQLite database is created automatically at `db/data.sqlite` on first load.
+## Using the app
 
-## Usage
+### 1) Test connectivity
 
-### Uploading files manually
+In the **ServiceNow Sync** tab:
+- choose auth mode (`basic` or `bearer`)
+- provide instance URL and credentials
+- click **Test connection**
 
-1. Go to the **Upload** tab
-2. Drag and drop one or more `.xlsx` files
-3. Review the preview — edit the target table name if needed
-4. Click **Load** to write to SQLite
-5. Switch to the **Database** tab to browse loaded tables and view data
+### 2) Pull a snapshot
 
-### Importing from Outlook
+- set lookback window (`since_days`)
+- set record caps for incidents and request items
+- optionally enable change requests and problems
+- click **Run snapshot sync**
 
-1. Go to the **Outlook** tab
-2. Set your filters — *Days back*, *Inbox subfolder* (optional), and *Subject contains* (optional)
-3. Click **Scan for Excel attachments** — the app searches your local Outlook Inbox and lists every `.xlsx`/`.xls` attachment found
-4. Tick the checkboxes next to the attachments you want to import
-5. Click **Import selected** — the files are loaded into SQLite using the same pipeline as manual uploads
+The app stores data into:
+- `sn_incident_snapshot`
+- `sn_request_item_snapshot`
+- `sn_change_request_snapshot` (optional)
+- `sn_problem_snapshot` (optional)
+- `sn_sync_runs`
 
-> **Note:** Outlook integration uses Windows COM automation (`pywin32`) and requires the Outlook desktop app to be installed and signed in.
+### 3) Analyze trends
 
-The **Admin** sidebar (visible on every tab) lets you:
+Use built-in charts in **Trends** tab or query these views:
+- `v_incident_trends_daily`
+- `v_request_type_trends_daily`
+- `v_incident_sla_daily`
+- `v_change_request_trends_daily`
+- `v_problem_trends_daily`
+- `v_incident_latest`
+- `v_request_item_latest`
+- `v_snapshot_run_summary`
 
-- Change the SQLite database path — useful for working with multiple databases
-- See the database file location and size
-- View a summary of all loaded tables with row and column counts
+## Automated daily sync
 
-## Running tests
+Use the CLI to run unattended snapshot jobs:
 
 ```bash
-pip install pytest
+python sync_snapshot.py --since-days 30 --include-change-requests --include-problems
+```
+
+Windows Task Scheduler action example:
+
+```text
+Program/script:
+    C:\Users\mipack\OneDrive - SAS\Documents\Workspace\Projects\excel-ingester-db-loader\.venv\Scripts\python.exe
+
+Add arguments:
+    sync_snapshot.py --since-days 30 --include-change-requests --include-problems
+
+Start in:
+    C:\Users\mipack\OneDrive - SAS\Documents\Workspace\Projects\excel-ingester-db-loader
+```
+
+This picks up values from `.env` and writes a new snapshot run every day.
+
+## Recommended trend metrics
+
+For incidents:
+- daily incident count by category
+- daily open incident count (backlog)
+- state mix trend (e.g. New/In Progress/Resolved)
+- SLA trend: resolved volume vs breached volume by day/priority
+
+For request types:
+- daily request volume by `cat_item` (request type)
+- open request item trend over time
+- request type share trend by week/month
+
+For change/problem domains (optional):
+- daily change request volume and open trend
+- daily problem volume and open trend
+
+## Example SQL queries
+
+Incident volume trend:
+
+```sql
+SELECT snapshot_date, SUM(ticket_count) AS total_incidents
+FROM v_incident_trends_daily
+GROUP BY snapshot_date
+ORDER BY snapshot_date;
+```
+
+Open backlog trend by incident category:
+
+```sql
+SELECT snapshot_date, category, SUM(open_count) AS open_incidents
+FROM v_incident_trends_daily
+GROUP BY snapshot_date, category
+ORDER BY snapshot_date, open_incidents DESC;
+```
+
+Request type trend:
+
+```sql
+SELECT snapshot_date, request_type, SUM(request_count) AS total_requests
+FROM v_request_type_trends_daily
+GROUP BY snapshot_date, request_type
+ORDER BY snapshot_date;
+```
+
+Incident SLA trend:
+
+```sql
+SELECT snapshot_date, priority, SUM(resolved_count) AS resolved, SUM(breached_count) AS breached
+FROM v_incident_sla_daily
+GROUP BY snapshot_date, priority
+ORDER BY snapshot_date, priority;
+```
+
+## Tests
+
+Run tests with:
+
+```bash
 python -m pytest tests/ -v
 ```
 
-## Connecting Power BI
+## Notes
 
-1. Install the [SQLite ODBC driver](http://www.ch-werner.de/sqliteodbc/)
-2. In Windows **ODBC Data Source Administrator**, create a User DSN pointing to `db/data.sqlite`
-3. In Power BI Desktop: **Get Data → ODBC** → select your DSN
-4. Select tables, build relationships, create visuals
-
-## Future Enhancements
-
-- Outlook integration — pull Excel attachments directly from email
-- Duplicate detection — warn if the same file has been loaded before
-- Multi-sheet support — select specific sheets from multi-tab workbooks
-- Column mapping — rename columns before loading
-- PostgreSQL migration — swap SQLite for Postgres when ready
-
----
-
-*Excel Data Ingestor · v1.0.0*
+- Run at least one sync per day to get stable daily trend lines.
+- If you need near-real-time trends, run snapshots more frequently and use `pulled_at` granularity.
+- Record caps are safeguards; increase them if your table volumes are larger.
