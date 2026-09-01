@@ -4,6 +4,8 @@ A Streamlit app that pulls operational data directly from ServiceNow and stores 
 
 ## What changed
 
+Quick command reference: see [RUNBOOK.md](RUNBOOK.md).
+
 This project no longer depends on Excel spreadsheets as its primary source.
 
 Data now flows like this:
@@ -50,8 +52,11 @@ pip install -e .
 
 ```env
 SN_INSTANCE_URL=https://your-instance.service-now.com
-SN_USERNAME=your_user
-SN_PASSWORD=your_password
+AZURE_TENANT_ID=your-tenant-id
+AZURE_CLIENT_ID=your-client-id
+AZURE_CLIENT_SECRET=your-client-secret
+# Optional. If empty, defaults to <AZURE_CLIENT_ID>/.default
+AZURE_SCOPE=api://[app-id-uri]/.default
 ```
 
 4. Run the app:
@@ -65,8 +70,8 @@ streamlit run app.py
 ### 1) Test connectivity
 
 In the **ServiceNow Sync** tab:
-- choose auth mode (`basic` or `bearer`)
-- provide instance URL and credentials
+- provide instance URL
+- ensure Azure env vars are set in `.env`
 - click **Test connection**
 
 ### 2) Pull a snapshot
@@ -91,6 +96,7 @@ Use built-in charts in **Trends** tab or query these views:
 - `v_incident_sla_daily`
 - `v_change_request_trends_daily`
 - `v_problem_trends_daily`
+- `v_problem_region_territory_trends_daily`
 - `v_incident_latest`
 - `v_request_item_latest`
 - `v_snapshot_run_summary`
@@ -100,8 +106,24 @@ Use built-in charts in **Trends** tab or query these views:
 Use the CLI to run unattended snapshot jobs:
 
 ```bash
-python sync_snapshot.py --since-days 30 --include-change-requests --include-problems
+python sync_snapshot.py --since-days 365 --include-change-requests --include-problems
 ```
+
+For large lookbacks, use burst mode. This splits the pull into date windows,
+acquires a fresh token for each window, deduplicates records, and writes one
+combined snapshot only after every burst succeeds:
+
+```bash
+python sync_snapshot.py --since-days 365 --burst-days 30 --request-max 0 --include-change-requests --include-problems
+```
+
+The final burst also includes all currently active incidents and request items,
+so aged backlog reporting is not limited to recently updated records. If a
+burst fails, no partial snapshot is written; rerun the command after resolving
+the API or authentication issue.
+
+For 12-month baseline runs, request items auto-page without a 5000 cap unless you explicitly set `--request-max` (or `SN_REQUEST_MAX`).
+Set `--request-max 0` to force unlimited pulls.
 
 Windows Task Scheduler action example:
 
@@ -110,13 +132,13 @@ Program/script:
     C:\Users\mipack\OneDrive - SAS\Documents\Workspace\Projects\excel-ingester-db-loader\.venv\Scripts\python.exe
 
 Add arguments:
-    sync_snapshot.py --since-days 30 --include-change-requests --include-problems
+    sync_snapshot.py --since-days 365 --include-change-requests --include-problems
 
 Start in:
     C:\Users\mipack\OneDrive - SAS\Documents\Workspace\Projects\excel-ingester-db-loader
 ```
 
-This picks up values from `.env` and writes a new snapshot run every day.
+This picks up values from `.env`, acquires an Entra access token, and writes a new snapshot run every day.
 
 ## Recommended trend metrics
 
@@ -134,6 +156,7 @@ For request types:
 For change/problem domains (optional):
 - daily change request volume and open trend
 - daily problem volume and open trend
+- daily problem trend by CI region and territory
 
 ## Example SQL queries
 

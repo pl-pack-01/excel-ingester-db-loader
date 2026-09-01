@@ -1,0 +1,53 @@
+-- DAX measures for Power BI Problem Ticket report
+
+Total Problems =
+COUNTROWS('Problem Latest Detail')
+
+Open Problems =
+CALCULATE(
+    [Total Problems],
+    'Problem Latest Detail'[is_open] = 1
+)
+
+Closed Problems =
+[Total Problems] - [Open Problems]
+
+Open Rate % =
+DIVIDE([Open Problems], [Total Problems])
+
+Avg Age Days =
+AVERAGE('Problem Latest Detail'[age_days])
+
+P95 Age Days =
+PERCENTILEX.INC(
+    'Problem Latest Detail',
+    'Problem Latest Detail'[age_days],
+    0.95
+)
+
+Problems Wo Territory =
+CALCULATE(
+    [Total Problems],
+    OR(
+        ISBLANK('Problem Latest Detail'[territory]),
+        'Problem Latest Detail'[territory] = "Unknown Territory"
+    )
+)
+
+Known Error Problems =
+CALCULATE(
+    [Total Problems],
+    'Problem Latest Detail'[known_error] = "true"
+)
+
+Closed Last 30d =
+CALCULATE(
+    [Closed Problems],
+    DATESINPERIOD('Date'[Date], MAX('Date'[Date]), -30, DAY)
+)
+
+Opened Last 30d =
+CALCULATE(
+    [Total Problems],
+    DATESINPERIOD('Date'[Date], MAX('Date'[Date]), -30, DAY)
+)

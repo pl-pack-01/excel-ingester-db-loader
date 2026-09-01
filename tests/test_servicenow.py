@@ -192,6 +192,190 @@ class TestNormalization:
             assert called_url.startswith("https://")
 
 
+class TestPullOperationalSnapshot:
+    def test_problem_ci_enrichment_fields_added(self):
+        incident_rows = {"status": "success", "records": []}
+        request_rows = {"status": "success", "records": []}
+        problem_rows = {
+            "status": "success",
+            "records": [
+                {
+                    "sys_id": "prob-1",
+                    "number": "PRB0001",
+                    "cmdb_ci": {"value": "ci-123", "display_value": "Edge Router"},
+                }
+            ],
+        }
+        ci_rows = {
+            "status": "success",
+            "records": [
+                {
+                    "sys_id": "ci-123",
+                    "name": "Edge Router",
+                    "location": {"value": "loc-1", "display_value": "US East DC"},
+                    "u_lob": {"value": "lob-1", "display_value": "JCP.LOB"},
+                }
+            ],
+        }
+        location_rows = {
+            "status": "success",
+            "records": [
+                {
+                    "sys_id": "loc-1",
+                    "name": "US East DC",
+                    "full_name": "Global/Americas/UNITED STATES",
+                    "parent": "",
+                }
+            ],
+        }
+        group_rows = {
+            "status": "success",
+            "records": [
+                {
+                    "sys_id": "lob-1",
+                    "name": "JCP.LOB",
+                    "u_customer_account": {"value": "acct-1", "display_value": "Penney Opco LLC"},
+                }
+            ],
+        }
+        account_rows = {
+            "status": "success",
+            "records": [
+                {
+                    "sys_id": "acct-1",
+                    "name": "Penney Opco LLC",
+                    "country": "US",
+                    "state": "TX",
+                    "city": "Plano",
+                }
+            ],
+        }
+
+        with patch("servicenow.fetch_all_records") as mock_fetch:
+            mock_fetch.side_effect = [
+                incident_rows,
+                request_rows,
+                problem_rows,
+                ci_rows,
+                location_rows,
+                group_rows,
+                account_rows,
+            ]
+
+            result = sn.pull_operational_snapshot(
+                "https://dev123.service-now.com",
+                username="user",
+                password="pass",
+                include_problems=True,
+                since_days=365,
+                operational_query="sys_updated_on>=2026-08-01 00:00:00^sys_updated_on<2026-08-25 00:00:00",
+            )
+
+        assert result["status"] == "success"
+        assert result["problem_count"] == 1
+        problem = result["problems"][0]
+        assert problem["cmdb_ci_sys_id"] == "ci-123"
+        assert problem["cmdb_ci_name"] == "Edge Router"
+        assert problem["cmdb_ci_region"] == "Americas"
+        assert problem["cmdb_ci_territory"] == "UNITED STATES"
+        assert problem["cmdb_ci_lob"] == "JCP.LOB"
+        assert problem["cmdb_ci_customer_relationship"] == "Penney Opco LLC"
+        assert problem["cmdb_ci_customer_relationship_region"] == "US"
+        assert problem["cmdb_ci_customer_relationship_territory"] == "TX"
+        assert mock_fetch.call_args_list[0].kwargs["query"] == (
+            "sys_updated_on>=2026-08-01 00:00:00^sys_updated_on<2026-08-25 00:00:00"
+        )
+        assert mock_fetch.call_args_list[3].kwargs["query"] == "sys_idINci-123"
+        assert mock_fetch.call_args_list[4].kwargs["query"] == "sys_idINloc-1"
+        assert mock_fetch.call_args_list[5].kwargs["query"] == "sys_idINlob-1"
+        assert mock_fetch.call_args_list[6].kwargs["query"] == "sys_idINacct-1"
+
+    def test_resolve_region_territory_walks_parent_chain(self):
+        locations_by_id = {
+            "leaf": {"sys_id": "leaf", "full_name": "Azure - East US - VSP A", "parent": "country"},
+            "country": {
+                "sys_id": "country",
+                "full_name": "Global/Americas/UNITED STATES",
+                "parent": "",
+            },
+        }
+        region, territory = sn.resolve_region_territory("leaf", locations_by_id)
+        assert region == "Americas"
+        assert territory == "UNITED STATES"
+
+    def test_resolve_region_territory_unresolved_returns_none(self):
+        locations_by_id = {"leaf": {"sys_id": "leaf", "full_name": "Datacenter A", "parent": ""}}
+        region, territory = sn.resolve_region_territory("leaf", locations_by_id)
+        assert region is None
+        assert territory is None
+
+    def test_fetch_customer_account_geography_resolves_chain(self):
+        group_rows = {
+            "status": "success",
+            "records": [
+                {
+                    "sys_id": "lob-1",
+                    "name": "JCP.LOB",
+                    "u_customer_account": {"value": "acct-1", "display_value": "Penney Opco LLC"},
+                }
+            ],
+        }
+        account_rows = {
+            "status": "success",
+            "records": [
+                {"sys_id": "acct-1", "name": "Penney Opco LLC", "country": "US", "state": "TX", "city": "Plano"}
+            ],
+        }
+        with patch("servicenow.fetch_all_records") as mock_fetch:
+            mock_fetch.side_effect = [group_rows, account_rows]
+            result = sn.fetch_customer_account_geography(
+                "https://dev123.service-now.com",
+                lob_group_ids=["lob-1"],
+                username="user",
+                password="pass",
+            )
+        assert result["lob-1"]["lob_name"] == "JCP.LOB"
+        assert result["lob-1"]["account_name"] == "Penney Opco LLC"
+        assert result["lob-1"]["country"] == "US"
+        assert result["lob-1"]["state"] == "TX"
+
+    def test_fetch_customer_account_geography_empty_input(self):
+        assert sn.fetch_customer_account_geography("https://dev123.service-now.com", lob_group_ids=[]) == {}
+
+
+class TestAzureAccessToken:
+    def test_get_azure_access_token_success(self):
+        with patch("servicenow.requests.post") as mock_post:
+            response = Mock()
+            response.status_code = 200
+            response.json.return_value = {
+                "access_token": "token-123",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+            }
+            mock_post.return_value = response
+
+            result = sn.get_azure_access_token(
+                tenant_id="tenant-id",
+                client_id="client-id",
+                client_secret="client-secret",
+                scope="api://servicenow/.default",
+            )
+
+        assert result["status"] == "success"
+        assert result["access_token"] == "token-123"
+        assert result["scope"] == "api://servicenow/.default"
+
+    def test_get_azure_access_token_requires_fields(self):
+        result = sn.get_azure_access_token(
+            tenant_id="",
+            client_id="client-id",
+            client_secret="",
+        )
+        assert result["status"] == "error"
+        assert "missing azure credentials" in result["message"].lower()
+
+
 # ---------------------------------------------------------------------------
 # OAuth 2.0 – token acquisition
 # ---------------------------------------------------------------------------

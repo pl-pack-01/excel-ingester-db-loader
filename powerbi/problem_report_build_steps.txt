@@ -1,0 +1,72 @@
+Power BI Build Steps - Problem Ticket Report
+
+0) Install SQLite driver for Power BI Desktop (one-time)
+- In Power BI Desktop, go to Get Data -> More and search for ODBC.
+- Select ODBC and click Connect.
+- In the ODBC Data Source Administrator (64-bit), verify the SQLite driver is installed:
+    - Look for an entry such as "SQLite3 ODBC Driver".
+    - If not installed, download and install the 64-bit SQLite ODBC driver (must match 64-bit Power BI Desktop).
+    - Recommended package: sqliteodbc_w64.exe from the ch-werner sqliteodbc project.
+- After installation, restart Power BI Desktop.
+- In Power BI Desktop, go to Get Data -> More -> ODBC.
+- Select the SQLite version and configure the connection to db/data.sqlite.
+
+1) Connect to SQLite
+- Open Power BI Desktop.
+- Get Data -> More -> Search for ODBC.
+- Select the SQLite ODBC connection configured in step 0.
+
+2) Import these datasets using SQL from powerbi/problem_report_queries.sql
+- Daily trend (all snapshots)
+- Region trend (daily)
+- Territory trend (daily)
+- Latest snapshot detail
+- Latest snapshot by category and state
+- Latest snapshot by region and territory
+- Latest snapshot aging bands
+
+3) Suggested table names in Power BI
+- Problem Daily Trend
+- Problem Region Trend
+- Problem Territory Trend
+- Problem Latest Detail
+- Problem Category State
+- Problem Region Territory Latest
+- Problem Aging Bands
+
+4) Add Date table (DAX)
+Date = CALENDAR(MIN('Problem Daily Trend'[snapshot_date]), MAX('Problem Daily Trend'[snapshot_date]))
+
+5) Add relationships
+- Date[Date] -> Problem Daily Trend[snapshot_date]
+- Date[Date] -> Problem Region Trend[snapshot_date]
+- Date[Date] -> Problem Territory Trend[snapshot_date]
+- Keep Problem Latest Detail as a latest-state snapshot table (no date relationship required unless desired).
+
+6) Add measures from powerbi/problem_report_measures.dax
+- Paste into a measures table or into Problem Latest Detail.
+
+7) Build report pages
+Page 1 - Executive Overview
+- KPI cards: Total Problems, Open Problems, Closed Problems, Open Rate %, Avg Age Days.
+- Line chart: Problem Daily Trend by snapshot_date (total/open/closed).
+- Stacked bar: Problem Category State by category with open/closed split.
+
+Page 2 - Region and Territory
+- Matrix: region -> territory with problem_count, open_count, closed_count from Problem Region Territory Latest.
+- Map or filled map: region with problem_count.
+- Trend line: Problem Region Trend by snapshot_date and region.
+
+Page 3 - Operations Queue
+- Table: Problem Latest Detail (number, state, priority, region, territory, assignment_group, assigned_to, age_days, short_description).
+- Slicers: region, territory, category, state, priority, known_error.
+- Aging bar chart from Problem Aging Bands.
+
+8) Refresh and publish
+- Refresh Desktop model.
+- Publish to workspace.
+- Configure scheduled refresh and gateway if needed.
+
+9) Optional guardrails
+- Add data quality card using Problems Wo Territory measure.
+- Add a filter to exclude Unknown Region/Territory for leadership views.
